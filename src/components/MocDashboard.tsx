@@ -274,7 +274,7 @@ export default function MocDashboard() {
           <span>
             Protocol Sequence: <strong className="text-amber-400">1. Council Rotaractors</strong> ➔ <strong className="text-purple-300">2. Rotarians</strong> ➔ <strong className="text-blue-300">3. General Rotaractors</strong> ➔ <strong className="text-emerald-300">4. Guests</strong>
           </span>
-          <span className="flex items-center gap-1">
+          <span className="flex items-center gap-1" suppressHydrationWarning>
             <Clock className="w-3 h-3 text-slate-500" />
             Last synced: {lastUpdated.toLocaleTimeString()}
           </span>
