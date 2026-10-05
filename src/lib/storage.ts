@@ -6,7 +6,7 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'registrations.json');
 
 // In-memory fallback cache (essential for Vercel serverless persistence)
-let memoryCache: Registration[] | null = null;
+let memoryCache: Registration[] = [];
 let lastFetchedTime = 0;
 const CACHE_TTL_MS = 3000;
 
@@ -15,10 +15,10 @@ function readLocalFile(): Registration[] {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const data = fs.readFileSync(DATA_FILE, 'utf-8');
-      return JSON.parse(data) as Registration[];
+      const parsed = JSON.parse(data);
+      return Array.isArray(parsed) ? parsed : [];
     }
   } catch (err) {
-    // Expected on serverless environments with restricted filesystem
     console.warn('Filesystem read not available or empty:', err);
   }
   return [];
@@ -32,22 +32,55 @@ function writeLocalFile(registrations: Registration[]) {
     }
     fs.writeFileSync(DATA_FILE, JSON.stringify(registrations, null, 2), 'utf-8');
   } catch (err) {
-    // Vercel serverless has a read-only filesystem; in-memory cache & Google Sheets take over
     console.warn('Filesystem write skipped (running in serverless):', err);
   }
+}
+
+// Merge two lists without losing any registrations
+function mergeRegistrations(listA: Registration[], listB: Registration[]): Registration[] {
+  const map = new Map<string, Registration>();
+  
+  // Add listB first (e.g. local)
+  for (const item of listB) {
+    if (item && item.id) map.set(item.id, item);
+  }
+  
+  // Merge listA (e.g. Google Sheets)
+  for (const item of listA) {
+    if (item && item.id) {
+      const existing = map.get(item.id);
+      if (existing) {
+        // preserve announced status if toggled locally
+        map.set(item.id, { ...existing, ...item, announced: existing.announced || item.announced });
+      } else {
+        map.set(item.id, item);
+      }
+    }
+  }
+
+  // Return sorted by date or order
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
 }
 
 export async function getAllRegistrations(): Promise<Registration[]> {
   const now = Date.now();
 
-  // Return cache immediately if within TTL
-  if (memoryCache !== null && now - lastFetchedTime < CACHE_TTL_MS) {
+  // If memory cache exists and is fresh, return immediately
+  if (memoryCache.length > 0 && now - lastFetchedTime < CACHE_TTL_MS) {
     return memoryCache;
+  }
+
+  // Load from local file as baseline
+  const localList = readLocalFile();
+  if (localList.length > 0 && memoryCache.length === 0) {
+    memoryCache = localList;
   }
 
   const webhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
 
-  // 1. If Google Sheet Webhook is configured, fetch live from Google Sheets
+  // Fetch live from Google Sheets if configured
   if (webhookUrl && webhookUrl.startsWith('http')) {
     try {
       const controller = new AbortController();
@@ -63,35 +96,33 @@ export async function getAllRegistrations(): Promise<Registration[]> {
       if (res.ok) {
         const data = await res.json();
         if (data && Array.isArray(data.registrations)) {
-          memoryCache = data.registrations as Registration[];
+          // Merge with memoryCache so we never delete existing local registrations
+          memoryCache = mergeRegistrations(data.registrations as Registration[], memoryCache);
           lastFetchedTime = Date.now();
+          writeLocalFile(memoryCache);
           return memoryCache;
         }
       }
     } catch (err) {
-      console.warn('Google Sheets fetch failed or timed out, falling back to cache:', err);
+      console.warn('Google Sheets fetch failed or timed out, preserving cache:', err);
     }
   }
 
-  // 2. Return memory cache if available
-  if (memoryCache !== null) {
-    return memoryCache;
-  }
-
-  // 3. Fallback to local JSON file
-  const local = readLocalFile();
-  memoryCache = local;
-  return local;
+  return memoryCache;
 }
 
 export async function saveRegistration(input: RegistrationInput): Promise<Registration> {
   const currentList = await getAllRegistrations();
 
-  const srNo = currentList.length + 1;
+  // Unique permanent ID so entries can NEVER overwrite each other
+  const uniqueId = `REG-${Date.now()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+  
+  // Calculate next sequential Sr No based on total count
+  const nextSrNo = currentList.length + 1;
 
   const newEntry: Registration = {
-    id: String(srNo),
-    srNo: srNo,
+    id: uniqueId,
+    srNo: nextSrNo,
     name: input.name.trim(),
     phone: input.phone.trim(),
     category: input.category,
@@ -104,8 +135,8 @@ export async function saveRegistration(input: RegistrationInput): Promise<Regist
     createdAt: new Date().toISOString(),
   };
 
-  // Prepend new entry
-  const updatedList = [newEntry, ...currentList.filter((r) => r.id !== newEntry.id)];
+  // Safe prepend: NEVER filter out or delete existing entries!
+  const updatedList = [newEntry, ...currentList];
   memoryCache = updatedList;
   writeLocalFile(updatedList);
 
@@ -128,7 +159,7 @@ export async function saveRegistration(input: RegistrationInput): Promise<Regist
 
 export async function toggleAnnounced(id: string): Promise<Registration | null> {
   const registrations = await getAllRegistrations();
-  const index = registrations.findIndex((r) => r.id === id);
+  const index = registrations.findIndex((r) => r.id === id || String(r.srNo) === id);
   if (index === -1) return null;
 
   registrations[index].announced = !registrations[index].announced;
@@ -141,7 +172,7 @@ export async function toggleAnnounced(id: string): Promise<Registration | null> 
     fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'TOGGLE_ANNOUNCED', id }),
+      body: JSON.stringify({ action: 'TOGGLE_ANNOUNCED', id, srNo: registrations[index].srNo }),
     }).catch((err) => console.warn('Toggle sync to Google Sheet skipped:', err));
   }
 
@@ -150,7 +181,7 @@ export async function toggleAnnounced(id: string): Promise<Registration | null> 
 
 export async function deleteRegistration(id: string): Promise<boolean> {
   const registrations = await getAllRegistrations();
-  const filtered = registrations.filter((r) => r.id !== id);
+  const filtered = registrations.filter((r) => r.id !== id && String(r.srNo) !== id);
   if (filtered.length === registrations.length) return false;
 
   memoryCache = filtered;

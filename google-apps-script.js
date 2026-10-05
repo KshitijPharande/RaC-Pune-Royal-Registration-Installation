@@ -47,7 +47,7 @@ function doPost(e) {
     if (data.action === "TOGGLE_ANNOUNCED") {
       var rows = sheet.getDataRange().getValues();
       for (var i = 1; i < rows.length; i++) {
-        if (String(rows[i][0]) == String(data.id) || String(rows[i][0]) == String(data.srNo)) {
+        if (String(rows[i][0]) == String(data.srNo) || String(rows[i][0]) == String(data.id)) {
           var current = rows[i][11] === "YES";
           var updated = !current ? "YES" : "NO";
           sheet.getRange(i + 1, 12).setValue(updated);
@@ -55,13 +55,13 @@ function doPost(e) {
             .setMimeType(ContentService.MimeType.JSON);
         }
       }
-      return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Sr No not found" }))
+      return ContentService.createTextOutput(JSON.stringify({ success: false, error: "Record not found" }))
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    // Smart row finder: Scan Column A to find the first truly empty row
+    // Find the next available row in Column A
     var colA = sheet.getRange("A:A").getValues();
-    var targetRow = 2; // Row 1 is headers, so attendees start on Row 2
+    var targetRow = 2; // Row 1 is headers, attendees start at Row 2
     for (var i = 1; i < colA.length; i++) {
       if (colA[i][0] === "" || colA[i][0] === null || colA[i][0] === undefined) {
         targetRow = i + 1;
@@ -72,7 +72,7 @@ function doPost(e) {
       }
     }
 
-    // Sr. No. is exactly (targetRow - 1): Row 2 = Sr No 1, Row 3 = Sr No 2, etc.
+    // Sr. No. is targetRow - 1 (Row 2 = Sr No 1, Row 3 = Sr No 2, etc.)
     var srNo = targetRow - 1;
 
     var now = new Date();
@@ -103,13 +103,13 @@ function doPost(e) {
       data.announced ? "YES" : "NO"
     ];
     
-    // Write directly into targetRow (avoids skipping rows even if blank cells existed)
+    // Append or set at target row
     sheet.getRange(targetRow, 1, 1, newRow.length).setValues([newRow]);
     
     return ContentService.createTextOutput(JSON.stringify({ 
       success: true, 
       srNo: srNo,
-      id: String(srNo),
+      id: data.id || ("REG-" + srNo),
       targetRow: targetRow,
       message: "Row added to Google Sheet successfully" 
     })).setMimeType(ContentService.MimeType.JSON);
@@ -150,7 +150,7 @@ function doGet(e) {
       
       var srNoNum = Number(r[0]) || i;
       registrations.push({
-        id: String(srNoNum),
+        id: "REG-SR-" + srNoNum + "-" + (String(r[4] || "").replace(/[^0-9]/g, "").slice(-4)),
         srNo: srNoNum,
         createdAt: r[1] ? String(r[1]) : new Date().toISOString(),
         name: String(r[3] || ""),
